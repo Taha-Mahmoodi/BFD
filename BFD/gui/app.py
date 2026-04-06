@@ -709,6 +709,8 @@ class BfdWizardWindow(QMainWindow):
             str(root_path),
             "-BaseFolderName",
             base_folder,
+            "-AutoInstallFonts",
+            "true",
             "-InstallScope",
             "currentuser",
             "-ControlFilePath",
@@ -815,12 +817,12 @@ class BfdWizardWindow(QMainWindow):
             self.fetch_bar.setValue(0)
             self.download_bar.setValue(0)
             self.extract_bar.setValue(0)
-            self.fetch_info.setText(f"{provider_name} ({index}/{total})")
-            self.download_info.setText("Info: waiting")
-            self.extract_info.setText("Info: waiting")
-            self.fetch_status.setText("Status: On going")
-            self.download_status.setText("Status: waiting")
-            self.extract_status.setText("Status: waiting")
+            self.fetch_info.setText(f"Info: preparing {provider_name} ({index}/{total})")
+            self.download_info.setText("Info: downloading... 0%")
+            self.extract_info.setText("Info: extracting... 0%")
+            self.fetch_status.setText("Status: On going (0%)")
+            self.download_status.setText("Status: waiting (0%)")
+            self.extract_status.setText("Status: waiting (0%)")
             return
 
         if event.name == "provider_attempt":
@@ -837,6 +839,12 @@ class BfdWizardWindow(QMainWindow):
             self.fetch_bar.setValue(100)
             self.download_bar.setValue(100)
             self.extract_bar.setValue(100)
+            self.fetch_info.setText("Info: fetch complete")
+            self.download_info.setText("Info: download complete")
+            self.extract_info.setText("Info: extraction complete")
+            self.fetch_status.setText("Status: Done")
+            self.download_status.setText("Status: Done")
+            self.extract_status.setText("Status: Done")
             self._append_log(f"{provider_name} completed [{status}] fonts={font_count}")
             return
 
@@ -844,21 +852,33 @@ class BfdWizardWindow(QMainWindow):
             stage = str(p.get("stage", "")).lower()
             percent = max(0, min(100, int(float(p.get("percent", 0)))))
             message = str(p.get("message", ""))
-            status_text = "Status: Done" if percent >= 100 else "Status: On going"
+            status_text = "Status: Done" if percent >= 100 else f"Status: On going ({percent}%)"
             if stage == "fetch":
                 self.fetch_bar.setValue(percent)
                 if message:
                     self.fetch_info.setText(message)
+                elif percent >= 100:
+                    self.fetch_info.setText("Info: fetch complete")
+                else:
+                    self.fetch_info.setText(f"Info: fetching... {percent}%")
                 self.fetch_status.setText(status_text)
             elif stage == "download":
                 self.download_bar.setValue(percent)
                 if message:
                     self.download_info.setText(message)
+                elif percent >= 100:
+                    self.download_info.setText("Info: download complete")
+                else:
+                    self.download_info.setText(f"Info: downloading... {percent}%")
                 self.download_status.setText(status_text)
             elif stage == "extract":
                 self.extract_bar.setValue(percent)
                 if message:
                     self.extract_info.setText(message)
+                elif percent >= 100:
+                    self.extract_info.setText("Info: extraction complete")
+                else:
+                    self.extract_info.setText(f"Info: extracting... {percent}%")
                 self.extract_status.setText(status_text)
             if message:
                 self._append_log(message)
@@ -889,11 +909,13 @@ class BfdWizardWindow(QMainWindow):
             current = int(float(p.get("current", 0)))
             total = int(float(p.get("total", 0)))
             self.install_bar.setValue(percent)
-            self.install_status.setText("Status: Done" if percent >= 100 else "Status: On going")
+            self.install_status.setText("Status: Done" if percent >= 100 else f"Status: On going ({percent}%)")
             if total > 0:
                 self.install_info.setText(f"Installing {font} ({current}/{total})")
             elif font:
                 self.install_info.setText(f"Installing {font}")
+            else:
+                self.install_info.setText(f"Info: installing... {percent}%")
             return
 
         if event.name == "install_completed":

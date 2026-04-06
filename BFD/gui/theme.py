@@ -154,6 +154,11 @@ QPlainTextEdit {
     border: 5px solid #f95c4b;
     border-radius: 20px;
     background: #e4ded2;
+    color: #111111;
+    selection-color: #111111;
+    selection-background-color: #d7d0c4;
+    font-family: "Consolas", "Cascadia Mono", "Courier New", monospace;
+    font-style: normal;
     font-size: 14px;
     padding: 8px;
 }

@@ -7,7 +7,7 @@ param(
     [ValidateSet("direct", "api", "html")]
     [string[]]$MethodOrder = @("direct", "api", "html"),
     [string]$GoogleApiKey = $env:GOOGLE_FONTS_API_KEY,
-    [bool]$AutoInstallFonts = $true,
+    [object]$AutoInstallFonts = $true,
     [ValidateSet("currentuser", "allusers")]
     [string]$InstallScope = "currentuser",
     [string]$ControlFilePath = "",
@@ -35,6 +35,41 @@ $script:ProviderCount = [Math]::Max(1, $Providers.Count)
 $script:OutputFolder = ""
 $script:CurrentProviderIndex = 1
 $script:CurrentProviderName = ""
+
+function Convert-ToBfdBoolean {
+    param(
+        [Parameter(Mandatory = $false)][AllowNull()][object]$Value,
+        [Parameter(Mandatory = $false)][bool]$Default = $true
+    )
+
+    if ($null -eq $Value) {
+        return $Default
+    }
+
+    if ($Value -is [bool]) {
+        return [bool]$Value
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $Default
+    }
+
+    switch ($text.Trim().ToLowerInvariant()) {
+        "true" { return $true }
+        "1" { return $true }
+        "yes" { return $true }
+        "y" { return $true }
+        "on" { return $true }
+        "false" { return $false }
+        "0" { return $false }
+        "no" { return $false }
+        "n" { return $false }
+        "off" { return $false }
+    }
+
+    return $Default
+}
 
 function Write-GuiEvent {
     param(
@@ -137,6 +172,7 @@ $eventCallback = {
 try {
     Set-OverallProgress -Percent 1 -Message "Initializing BFD worker"
     Write-Status -Message "BFD worker initialized."
+    $AutoInstallFonts = Convert-ToBfdBoolean -Value $AutoInstallFonts -Default $true
 
     $summary = Invoke-BfdRun -Providers $Providers -MethodOrder $MethodOrder -DownloadsRoot $DownloadsRoot -BaseFolderName $BaseFolderName -DateFormat $DateFormat -GoogleApiKey $GoogleApiKey -EventCallback $eventCallback -StopSignalPath $ControlFilePath
     $script:OutputFolder = [string]$summary.outputFolder
