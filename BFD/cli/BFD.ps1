@@ -17,6 +17,32 @@ $ErrorActionPreference = "Stop"
 
 Import-Module (Join-Path $PSScriptRoot "..\core\BFD.Engine.psm1") -Force
 
+function Normalize-BfdProviders {
+    param([Parameter(Mandatory = $false)][string[]]$Values)
+
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($value in $Values) {
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            continue
+        }
+
+        foreach ($part in ($value -split ",")) {
+            $token = $part.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($token)) {
+                $result.Add($token)
+            }
+        }
+    }
+
+    if ($result.Count -eq 0) {
+        $result.Add("google_fonts")
+    }
+
+    return [string[]]$result.ToArray()
+}
+
+$Providers = Normalize-BfdProviders -Values $Providers
+
 Write-Host "[BFD] Starting run"
 Write-Host "[BFD] Providers: $($Providers -join ', ')"
 Write-Host "[BFD] Method order: $($MethodOrder -join ' -> ')"

@@ -36,6 +36,30 @@ $script:OutputFolder = ""
 $script:CurrentProviderIndex = 1
 $script:CurrentProviderName = ""
 
+function Normalize-BfdProviders {
+    param([Parameter(Mandatory = $false)][string[]]$Values)
+
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($value in $Values) {
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            continue
+        }
+
+        foreach ($part in ($value -split ",")) {
+            $token = $part.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($token)) {
+                $result.Add($token)
+            }
+        }
+    }
+
+    if ($result.Count -eq 0) {
+        $result.Add("google_fonts")
+    }
+
+    return [string[]]$result.ToArray()
+}
+
 function Convert-ToBfdBoolean {
     param(
         [Parameter(Mandatory = $false)][AllowNull()][object]$Value,
@@ -172,6 +196,8 @@ $eventCallback = {
 try {
     Set-OverallProgress -Percent 1 -Message "Initializing BFD worker"
     Write-Status -Message "BFD worker initialized."
+    $Providers = Normalize-BfdProviders -Values $Providers
+    $script:ProviderCount = [Math]::Max(1, $Providers.Count)
     $AutoInstallFonts = Convert-ToBfdBoolean -Value $AutoInstallFonts -Default $true
 
     $summary = Invoke-BfdRun -Providers $Providers -MethodOrder $MethodOrder -DownloadsRoot $DownloadsRoot -BaseFolderName $BaseFolderName -DateFormat $DateFormat -GoogleApiKey $GoogleApiKey -EventCallback $eventCallback -StopSignalPath $ControlFilePath

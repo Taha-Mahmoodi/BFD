@@ -556,6 +556,9 @@ class BfdWizardWindow(QMainWindow):
         self.estimate_size.setText(f"Size: ~{self._format_size_gb(size_total)}")
         self.estimate_time.setText(f"Time: ~{self._format_time_hours(time_total)}")
 
+    def _is_checked_state(self, state: int) -> bool:
+        return int(state) == int(Qt.CheckState.Checked)
+
     def _validate_output_inputs(self) -> tuple[Path, str] | None:
         downloads_root = self.downloads_root_input.text().strip()
         if not downloads_root:
@@ -586,15 +589,20 @@ class BfdWizardWindow(QMainWindow):
         if self._bulk_sync_in_progress:
             return
 
-        checked = state == Qt.Checked
+        checked = self._is_checked_state(state)
+        if not checked:
+            self._bulk_sync_in_progress = True
+            self.select_all.setChecked(True)
+            self._bulk_sync_in_progress = False
+            return
+
         self._bulk_sync_in_progress = True
-        if checked:
-            self.select_recommended.setChecked(False)
+        self.select_recommended.setChecked(False)
         for provider_id, check in self._provider_checks.items():
             if provider_id == "font_face":
                 continue
             if check.isEnabled():
-                check.setChecked(checked)
+                check.setChecked(True)
         self._bulk_sync_in_progress = False
         self._sync_bulk_selection_state()
         self._recalculate_estimate()
@@ -603,14 +611,19 @@ class BfdWizardWindow(QMainWindow):
         if self._bulk_sync_in_progress:
             return
 
-        checked = state == Qt.Checked
+        checked = self._is_checked_state(state)
+        if not checked:
+            self._bulk_sync_in_progress = True
+            self.select_recommended.setChecked(True)
+            self._bulk_sync_in_progress = False
+            return
+
         self._bulk_sync_in_progress = True
-        if checked:
-            self.select_all.setChecked(False)
+        self.select_all.setChecked(False)
         for provider_id, _, recommended, enabled in PROVIDERS:
             if not enabled or provider_id == "font_face":
                 continue
-            self._provider_checks[provider_id].setChecked(checked and recommended)
+            self._provider_checks[provider_id].setChecked(recommended)
         self._bulk_sync_in_progress = False
         self._sync_bulk_selection_state()
         self._recalculate_estimate()
@@ -718,8 +731,7 @@ class BfdWizardWindow(QMainWindow):
             "-EmitGuiEvents",
         ]
         args.extend(["-MethodOrder", "direct", "api", "html"])
-        args.append("-Providers")
-        args.extend(providers)
+        args.extend(["-Providers", ",".join(providers)])
 
         self._process.start("powershell.exe", args)
         if not self._process.waitForStarted(6000):
