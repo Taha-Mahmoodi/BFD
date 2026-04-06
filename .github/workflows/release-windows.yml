@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve Version and Tag
         shell: pwsh
@@ -59,6 +61,88 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Generate Structured Release Notes
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .\release | Out-Null
+
+          $currentTag = "$env:RELEASE_TAG"
+          $tags = @(git tag --list "v*" --sort=-v:refname)
+          $previousTag = $null
+          foreach ($tag in $tags) {
+            if ($tag -ne $currentTag) {
+              $previousTag = $tag
+              break
+            }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($previousTag)) {
+            $diffLines = @(git ls-files | ForEach-Object { "A`t$_" })
+            $commits = @(git log --pretty=format:"- %h %s" -n 50)
+            $comparisonText = "Initial automated release snapshot"
+          }
+          else {
+            $range = "$previousTag..HEAD"
+            $diffLines = @(git diff --name-status $range)
+            $commits = @(git log --pretty=format:"- %h %s" $range)
+            $comparisonText = "$previousTag -> $currentTag"
+          }
+
+          $added = New-Object "System.Collections.Generic.List[string]"
+          $changed = New-Object "System.Collections.Generic.List[string]"
+          $removed = New-Object "System.Collections.Generic.List[string]"
+
+          foreach ($line in $diffLines) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $parts = $line -split "`t"
+            if ($parts.Count -lt 2) { continue }
+            $status = [string]$parts[0]
+
+            if ($status.StartsWith("R") -and $parts.Count -ge 3) {
+              $changed.Add(("{0} -> {1}" -f $parts[1], $parts[2])) | Out-Null
+              continue
+            }
+
+            $path = $parts[-1]
+            if ($status.StartsWith("A")) {
+              $added.Add($path) | Out-Null
+            }
+            elseif ($status.StartsWith("D")) {
+              $removed.Add($path) | Out-Null
+            }
+            else {
+              $changed.Add($path) | Out-Null
+            }
+          }
+
+          $notesPath = ".\release\BFD-$env:APP_VERSION-release-notes.md"
+          $lines = New-Object "System.Collections.Generic.List[string]"
+          $lines.Add("# BFD v$env:APP_VERSION Release Notes") | Out-Null
+          $lines.Add("") | Out-Null
+          $lines.Add("Generated automatically from repository changes.") | Out-Null
+          $lines.Add("Comparison: $comparisonText") | Out-Null
+          $lines.Add("") | Out-Null
+
+          $lines.Add("## Added") | Out-Null
+          if ($added.Count -eq 0) { $lines.Add("- No added files in this release.") | Out-Null } else { $added | Sort-Object -Unique | ForEach-Object { $lines.Add("- $_") | Out-Null } }
+          $lines.Add("") | Out-Null
+
+          $lines.Add("## Changed") | Out-Null
+          if ($changed.Count -eq 0) { $lines.Add("- No changed files in this release.") | Out-Null } else { $changed | Sort-Object -Unique | ForEach-Object { $lines.Add("- $_") | Out-Null } }
+          $lines.Add("") | Out-Null
+
+          $lines.Add("## Removed") | Out-Null
+          if ($removed.Count -eq 0) { $lines.Add("- No removed files in this release.") | Out-Null } else { $removed | Sort-Object -Unique | ForEach-Object { $lines.Add("- $_") | Out-Null } }
+          $lines.Add("") | Out-Null
+
+          $lines.Add("## Commits Included") | Out-Null
+          if ($commits.Count -eq 0) { $lines.Add("- No commits detected for this comparison range.") | Out-Null } else { $commits | ForEach-Object { $lines.Add($_) | Out-Null } }
+
+          $lines | Set-Content -LiteralPath $notesPath -Encoding UTF8
+          "RELEASE_NOTES_PATH=$notesPath" >> $env:GITHUB_ENV
+          Write-Host "Generated release notes: $notesPath"
 
       - name: Install WiX CLI v6
         shell: pwsh
@@ -120,12 +204,10 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
           name: BFD v${{ env.APP_VERSION }}
-          body: |
-            Automated Windows build and release.
-            Mode: `${{ env.RELEASE_MODE }}`
-            Commit: `${{ github.sha }}`
+          body_path: ${{ env.RELEASE_NOTES_PATH }}
           files: |
             release/BFD-${{ env.APP_VERSION }}.exe
             release/BFD-${{ env.APP_VERSION }}.msi
+            release/BFD-${{ env.APP_VERSION }}-release-notes.md
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false

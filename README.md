@@ -77,9 +77,13 @@ python -m venv .venv
   - Manual `workflow_dispatch` also supported with optional `version` override
 - Auto version format:
   - `1.0.<run_number>` with release tag `v1.0.<run_number>`
+- Release documentation:
+  - Every release includes generated notes with `Added`, `Changed`, and `Removed` sections
+  - Notes are used as the release description and attached as a markdown asset
 - Assets:
   - `BFD-<version>.exe`
   - `BFD-<version>.msi`
+  - `BFD-<version>-release-notes.md`
 
 ## Roadmap
 

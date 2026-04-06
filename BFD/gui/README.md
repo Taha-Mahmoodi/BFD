@@ -34,6 +34,7 @@ Output: `dist\BFD-1.0.0.msi`
 - Windows release publishing is automated by `.github/workflows/release-windows.yml`.
 - Every push to `main` creates a new GitHub Release with EXE + MSI assets.
 - Manual workflow runs can override the version (for example `1.0.42`).
+- Each release includes structured markdown notes: `Added`, `Changed`, `Removed`.
 
 ## Runtime Worker
 
