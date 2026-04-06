@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
+import re
+import threading
 import sys
 import tempfile
+import time
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 import uuid
 
-from PySide6.QtCore import Qt, QProcess
+from PySide6.QtCore import Qt, QProcess, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -44,17 +50,37 @@ PROVIDERS = [
     ("befonts", "Befonts", False, True),
 ]
 
-PROVIDER_ESTIMATE = {
-    "google_fonts": {"size_gb": 20.0, "time_hours": 0.45},
-    "font_hub": {"size_gb": 8.0, "time_hours": 0.20},
-    "dafont": {"size_gb": 8.0, "time_hours": 0.20},
-    "font_share": {"size_gb": 5.0, "time_hours": 0.15},
-    "open_foundry": {"size_gb": 4.0, "time_hours": 0.15},
-    "befonts": {"size_gb": 5.0, "time_hours": 0.15},
+PROVIDER_BASE_SIZE_GB = {
+    "google_fonts": 20.0,
+    "font_hub": 8.0,
+    "dafont": 8.0,
+    "font_share": 5.0,
+    "open_foundry": 4.0,
+    "befonts": 5.0,
 }
+
+PROVIDER_HOME_URL = {
+    "google_fonts": "https://fonts.google.com/",
+    "font_hub": "https://fontshub.pro/",
+    "dafont": "https://www.dafont.com/",
+    "font_share": "https://www.fontshare.com/",
+    "open_foundry": "https://open-foundry.com/",
+    "befonts": "https://befonts.com/",
+}
+
+PROVIDER_GOOGLE_DIRECT_URL = "https://github.com/google/fonts/archive/refs/heads/main.zip"
+DEFAULT_SPEED_Mbps = 35.0
+OVERHEAD_FACTOR = 1.35
+SPEED_TEST_URLS = (
+    "https://speed.cloudflare.com/__down?bytes=1200000",
+    "https://proof.ovh.net/files/1Mb.dat",
+)
 
 
 class BfdWizardWindow(QMainWindow):
+    speed_probe_ready = Signal(float)
+    provider_size_ready = Signal(str, float)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("BFD (Bulk Font Downloader) v1.0.0")
@@ -69,11 +95,17 @@ class BfdWizardWindow(QMainWindow):
         self._phase = "download"
         self._cancel_requested = False
         self._bulk_sync_in_progress = False
+        self._network_speed_mbps: float | None = None
+        self._speed_probe_started = False
+        self._provider_size_overrides: dict[str, float] = {}
+        self._provider_fetch_in_progress: set[str] = set()
 
         self._process = QProcess(self)
         self._process.readyReadStandardOutput.connect(self._on_stdout)
         self._process.readyReadStandardError.connect(self._on_stderr)
         self._process.finished.connect(self._on_finished)
+        self.speed_probe_ready.connect(self._on_speed_probe_ready)
+        self.provider_size_ready.connect(self._on_provider_size_ready)
 
         self._provider_checks: dict[str, QCheckBox] = {}
 
@@ -192,7 +224,7 @@ class BfdWizardWindow(QMainWindow):
         for provider_id, label, recommended, enabled in PROVIDERS:
             check = QCheckBox(label, providers_box)
             check.setObjectName("ProviderCheck")
-            check.setChecked(recommended and enabled)
+            check.setChecked(False)
             check.setEnabled(enabled)
             if enabled and provider_id != "font_face":
                 check.stateChanged.connect(self._on_provider_selection_changed)
@@ -217,9 +249,9 @@ class BfdWizardWindow(QMainWindow):
         est_line = QFrame(actions_box)
         est_line.setFrameShape(QFrame.HLine)
         est_line.setStyleSheet("background: black; min-height: 2px; max-height: 2px;")
-        self.estimate_size = QLabel("Size: ~50GB", actions_box)
+        self.estimate_size = QLabel("Size: ~0GB", actions_box)
         self.estimate_size.setObjectName("BodyText")
-        self.estimate_time = QLabel("Time: ~1.30 Hour", actions_box)
+        self.estimate_time = QLabel("Time: ~0.00 Hour", actions_box)
         self.estimate_time.setObjectName("BodyText")
 
         actions_layout.addWidget(self.select_all)
@@ -440,17 +472,17 @@ class BfdWizardWindow(QMainWindow):
         self.downloads_root_input.setText(str(self._settings.get("downloads_root", str(Path.home() / "Downloads"))))
         self.base_folder_input.setText(str(self._settings.get("base_folder_name", "BFD Fonts")))
 
-        selected = set(self._settings.get("selected_providers", ["google_fonts"]))
         self._bulk_sync_in_progress = True
         for provider_id, _, _, enabled in PROVIDERS:
             check = self._provider_checks[provider_id]
             if not enabled:
                 check.setChecked(False)
                 continue
-            check.setChecked(provider_id in selected)
+            check.setChecked(False)
         self._bulk_sync_in_progress = False
         self._sync_bulk_selection_state()
         self._recalculate_estimate()
+        self._start_speed_probe_if_needed()
 
     def _persist_settings(self) -> None:
         selected = [pid for pid, check in self._provider_checks.items() if check.isChecked() and check.isEnabled()]
@@ -539,22 +571,142 @@ class BfdWizardWindow(QMainWindow):
             return f"{int(rounded)}GB"
         return f"{rounded:.1f}GB"
 
-    def _format_time_hours(self, value: float) -> str:
-        total_minutes = max(0, int(round(value * 60)))
+    def _format_time_hours(self, value_hours: float) -> str:
+        total_minutes = max(0, int(round(value_hours * 60)))
         hours = total_minutes // 60
         minutes = total_minutes % 60
         return f"{hours}.{minutes:02d} Hour"
 
+    def _estimate_download_time_hours(self, size_total_gb: float, speed_mbps: float) -> float:
+        if size_total_gb <= 0:
+            return 0.0
+        safe_speed = max(1.0, speed_mbps)
+        seconds = size_total_gb * 1024.0 * 8.0 / safe_speed
+        return (seconds / 3600.0) * OVERHEAD_FACTOR
+
     def _recalculate_estimate(self) -> None:
+        selected = self._selected_providers()
+        self._start_speed_probe_if_needed()
+        self._fetch_selected_provider_estimates(selected)
+
         size_total = 0.0
-        time_total = 0.0
-        for provider_id in self._selected_providers():
-            estimate = PROVIDER_ESTIMATE.get(provider_id, {"size_gb": 0.0, "time_hours": 0.0})
-            size_total += float(estimate.get("size_gb", 0.0))
-            time_total += float(estimate.get("time_hours", 0.0))
+        for provider_id in selected:
+            size_total += float(self._provider_size_overrides.get(provider_id, PROVIDER_BASE_SIZE_GB.get(provider_id, 0.0)))
+
+        effective_speed = self._network_speed_mbps if self._network_speed_mbps is not None else DEFAULT_SPEED_Mbps
+        time_total = self._estimate_download_time_hours(size_total, effective_speed)
 
         self.estimate_size.setText(f"Size: ~{self._format_size_gb(size_total)}")
-        self.estimate_time.setText(f"Time: ~{self._format_time_hours(time_total)}")
+        if self._network_speed_mbps is None:
+            self.estimate_time.setText(f"Time: ~{self._format_time_hours(time_total)} (measuring network...)")
+        else:
+            self.estimate_time.setText(f"Time: ~{self._format_time_hours(time_total)}")
+
+    def _start_speed_probe_if_needed(self) -> None:
+        if self._speed_probe_started:
+            return
+        self._speed_probe_started = True
+        threading.Thread(target=self._run_speed_probe, daemon=True).start()
+
+    def _run_speed_probe(self) -> None:
+        speed = self._measure_network_speed_mbps()
+        self.speed_probe_ready.emit(speed)
+
+    def _measure_network_speed_mbps(self) -> float:
+        best_speed = 0.0
+        for url in SPEED_TEST_URLS:
+            try:
+                req = urllib_request.Request(url, headers={"User-Agent": "BFD/1.0"})
+                started = time.perf_counter()
+                with urllib_request.urlopen(req, timeout=8) as response:
+                    data = response.read()
+                elapsed = max(0.1, time.perf_counter() - started)
+                if not data:
+                    continue
+                speed_mbps = ((len(data) * 8.0) / elapsed) / 1_000_000.0
+                best_speed = max(best_speed, speed_mbps)
+            except (OSError, urllib_error.URLError):
+                continue
+
+        if best_speed <= 0.0:
+            return DEFAULT_SPEED_Mbps
+        return round(min(1000.0, max(1.0, best_speed)), 2)
+
+    def _on_speed_probe_ready(self, speed_mbps: float) -> None:
+        self._network_speed_mbps = speed_mbps
+        self._recalculate_estimate()
+
+    def _fetch_selected_provider_estimates(self, providers: list[str]) -> None:
+        for provider_id in providers:
+            if provider_id in self._provider_size_overrides:
+                continue
+            if provider_id in self._provider_fetch_in_progress:
+                continue
+            self._provider_fetch_in_progress.add(provider_id)
+            threading.Thread(target=self._run_provider_estimate_probe, args=(provider_id,), daemon=True).start()
+
+    def _run_provider_estimate_probe(self, provider_id: str) -> None:
+        size_gb = self._fetch_provider_size_estimate(provider_id)
+        self.provider_size_ready.emit(provider_id, size_gb)
+
+    def _fetch_provider_size_estimate(self, provider_id: str) -> float:
+        fallback = float(PROVIDER_BASE_SIZE_GB.get(provider_id, 0.0))
+        try:
+            if provider_id == "google_fonts":
+                content_len = self._http_head_content_length(PROVIDER_GOOGLE_DIRECT_URL)
+                if content_len > 0:
+                    return max(0.1, round(content_len / (1024.0**3), 2))
+
+            if provider_id == "font_share":
+                payload = self._http_get_json("https://api.fontshare.com/v2/fonts")
+                fonts = payload.get("fonts", []) if isinstance(payload, dict) else []
+                if isinstance(fonts, list) and fonts:
+                    return max(0.1, round(len(fonts) * 0.08, 2))
+
+            home = PROVIDER_HOME_URL.get(provider_id)
+            if home:
+                link_count = self._fetch_provider_home_link_count(home)
+                if link_count > 0:
+                    scale = min(1.9, max(0.45, link_count / 80.0))
+                    return max(0.1, round(fallback * scale, 2))
+        except Exception:
+            return fallback
+
+        return fallback
+
+    def _fetch_provider_home_link_count(self, url: str) -> int:
+        html = self._http_get_text(url)
+        if not html:
+            return 0
+        matches = re.findall(r'(?i)(?:href|src)=["\']([^"\']+\.(?:zip|ttf|otf)[^"\']*)["\']', html)
+        return len(matches)
+
+    def _http_get_text(self, url: str) -> str:
+        req = urllib_request.Request(url, headers={"User-Agent": "BFD/1.0"})
+        with urllib_request.urlopen(req, timeout=8) as response:
+            data = response.read()
+        return data.decode("utf-8", errors="replace")
+
+    def _http_get_json(self, url: str) -> dict:
+        text = self._http_get_text(url)
+        loaded = json.loads(text)
+        if isinstance(loaded, dict):
+            return loaded
+        return {}
+
+    def _http_head_content_length(self, url: str) -> int:
+        req = urllib_request.Request(url, method="HEAD", headers={"User-Agent": "BFD/1.0"})
+        with urllib_request.urlopen(req, timeout=8) as response:
+            size = response.headers.get("Content-Length", "")
+        try:
+            return int(size)
+        except (TypeError, ValueError):
+            return 0
+
+    def _on_provider_size_ready(self, provider_id: str, size_gb: float) -> None:
+        self._provider_fetch_in_progress.discard(provider_id)
+        self._provider_size_overrides[provider_id] = max(0.1, float(size_gb))
+        self._recalculate_estimate()
 
     def _is_checked_state(self, state: int) -> bool:
         return int(state) == int(Qt.CheckState.Checked)
@@ -591,9 +743,7 @@ class BfdWizardWindow(QMainWindow):
 
         checked = self._is_checked_state(state)
         if not checked:
-            self._bulk_sync_in_progress = True
-            self.select_all.setChecked(True)
-            self._bulk_sync_in_progress = False
+            self._sync_bulk_selection_state()
             return
 
         self._bulk_sync_in_progress = True
@@ -613,9 +763,7 @@ class BfdWizardWindow(QMainWindow):
 
         checked = self._is_checked_state(state)
         if not checked:
-            self._bulk_sync_in_progress = True
-            self.select_recommended.setChecked(True)
-            self._bulk_sync_in_progress = False
+            self._sync_bulk_selection_state()
             return
 
         self._bulk_sync_in_progress = True
