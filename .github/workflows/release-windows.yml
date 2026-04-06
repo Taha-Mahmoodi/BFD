@@ -2,17 +2,21 @@
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - "main"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version for MSI/release (example: 1.0.0)"
-        required: true
+        description: "Optional version override for release (example: 1.0.42)"
+        required: false
         type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-windows-main
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
@@ -23,19 +27,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve Version
+      - name: Resolve Version and Tag
         shell: pwsh
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $version = "${{ github.event.inputs.version }}"
-          } else {
-            $version = "${{ github.ref_name }}".TrimStart("v")
+          $requestedVersion = "${{ github.event.inputs.version }}"
+
+          if (-not [string]::IsNullOrWhiteSpace($requestedVersion)) {
+            $version = $requestedVersion.Trim().TrimStart("v")
+            $releaseMode = "manual"
           }
-          if ([string]::IsNullOrWhiteSpace($version)) {
-            throw "Could not resolve version."
+          else {
+            $patch = [int]$env:GITHUB_RUN_NUMBER
+            if ($patch -gt 65000) {
+              $patch = ($patch % 65000) + 1
+            }
+            $version = "1.0.$patch"
+            $releaseMode = "auto"
           }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version must use MAJOR.MINOR.PATCH format. Resolved: '$version'"
+          }
+
+          $tag = "v$version"
           "APP_VERSION=$version" >> $env:GITHUB_ENV
-          Write-Host "Resolved APP_VERSION=$version"
+          "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          "RELEASE_MODE=$releaseMode" >> $env:GITHUB_ENV
+          Write-Host "Resolved APP_VERSION=$version TAG=$tag MODE=$releaseMode"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -99,11 +117,15 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.APP_VERSION }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           name: BFD v${{ env.APP_VERSION }}
+          body: |
+            Automated Windows build and release.
+            Mode: `${{ env.RELEASE_MODE }}`
+            Commit: `${{ github.sha }}`
           files: |
             release/BFD-${{ env.APP_VERSION }}.exe
             release/BFD-${{ env.APP_VERSION }}.msi
+          prerelease: false
           generate_release_notes: true
-
-

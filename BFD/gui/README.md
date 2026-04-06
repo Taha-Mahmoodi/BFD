@@ -29,6 +29,12 @@ cd .\BFD\gui
 
 Output: `dist\BFD-1.0.0.msi`
 
+## GitHub Release Automation
+
+- Windows release publishing is automated by `.github/workflows/release-windows.yml`.
+- Every push to `main` creates a new GitHub Release with EXE + MSI assets.
+- Manual workflow runs can override the version (for example `1.0.42`).
+
 ## Runtime Worker
 
 The GUI executes:

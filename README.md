@@ -72,11 +72,14 @@ python -m venv .venv
 ## Build and Release
 
 - Workflow: `.github/workflows/release-windows.yml`
-- Builds:
-  - `BFD.exe`
+- Trigger behavior:
+  - Every push to `main` automatically builds and publishes a new GitHub Release
+  - Manual `workflow_dispatch` also supported with optional `version` override
+- Auto version format:
+  - `1.0.<run_number>` with release tag `v1.0.<run_number>`
+- Assets:
+  - `BFD-<version>.exe`
   - `BFD-<version>.msi`
-- Tag format:
-  - `v1.0.0`
 
 ## Roadmap
 
