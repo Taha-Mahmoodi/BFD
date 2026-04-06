@@ -44,6 +44,15 @@ PROVIDERS = [
     ("befonts", "Befonts", False, True),
 ]
 
+PROVIDER_ESTIMATE = {
+    "google_fonts": {"size_gb": 20.0, "time_hours": 0.45},
+    "font_hub": {"size_gb": 8.0, "time_hours": 0.20},
+    "dafont": {"size_gb": 8.0, "time_hours": 0.20},
+    "font_share": {"size_gb": 5.0, "time_hours": 0.15},
+    "open_foundry": {"size_gb": 4.0, "time_hours": 0.15},
+    "befonts": {"size_gb": 5.0, "time_hours": 0.15},
+}
+
 
 class BfdWizardWindow(QMainWindow):
     def __init__(self) -> None:
@@ -59,6 +68,7 @@ class BfdWizardWindow(QMainWindow):
         self._last_output_folder = ""
         self._phase = "download"
         self._cancel_requested = False
+        self._bulk_sync_in_progress = False
 
         self._process = QProcess(self)
         self._process.readyReadStandardOutput.connect(self._on_stdout)
@@ -184,6 +194,8 @@ class BfdWizardWindow(QMainWindow):
             check.setObjectName("ProviderCheck")
             check.setChecked(recommended and enabled)
             check.setEnabled(enabled)
+            if enabled and provider_id != "font_face":
+                check.stateChanged.connect(self._on_provider_selection_changed)
             self._provider_checks[provider_id] = check
             providers_layout.addWidget(check)
         providers_layout.addStretch(1)
@@ -390,8 +402,8 @@ class BfdWizardWindow(QMainWindow):
         self.exit_button.setFixedSize(122, 78)
         self.exit_button.clicked.connect(self.close)
 
-        center_controls = QWidget(foot)
-        center = QHBoxLayout(center_controls)
+        self.center_controls = QWidget(foot)
+        center = QHBoxLayout(self.center_controls)
         center.setContentsMargins(0, 0, 0, 0)
         center.setSpacing(50)
 
@@ -415,7 +427,7 @@ class BfdWizardWindow(QMainWindow):
 
         row.addWidget(self.exit_button)
         row.addStretch(1)
-        row.addWidget(center_controls)
+        row.addWidget(self.center_controls)
         row.addStretch(1)
         row.addWidget(self.next_button)
         return foot
@@ -429,12 +441,16 @@ class BfdWizardWindow(QMainWindow):
         self.base_folder_input.setText(str(self._settings.get("base_folder_name", "BFD Fonts")))
 
         selected = set(self._settings.get("selected_providers", ["google_fonts"]))
+        self._bulk_sync_in_progress = True
         for provider_id, _, _, enabled in PROVIDERS:
             check = self._provider_checks[provider_id]
             if not enabled:
                 check.setChecked(False)
                 continue
             check.setChecked(provider_id in selected)
+        self._bulk_sync_in_progress = False
+        self._sync_bulk_selection_state()
+        self._recalculate_estimate()
 
     def _persist_settings(self) -> None:
         selected = [pid for pid, check in self._provider_checks.items() if check.isChecked() and check.isEnabled()]
@@ -464,6 +480,8 @@ class BfdWizardWindow(QMainWindow):
             frame.style().unpolish(frame)
             frame.style().polish(frame)
 
+        self.center_controls.setVisible(self._current_step >= 2)
+
         if self._state in {"running", "paused"}:
             self.cancel_button.setEnabled(True)
             self.pause_button.setEnabled(True)
@@ -492,6 +510,52 @@ class BfdWizardWindow(QMainWindow):
     def _selected_providers(self) -> list[str]:
         return [provider_id for provider_id, check in self._provider_checks.items() if check.isEnabled() and check.isChecked() and provider_id != "font_face"]
 
+    def _recommended_provider_ids(self) -> list[str]:
+        return [
+            provider_id
+            for provider_id, _, recommended, enabled in PROVIDERS
+            if enabled and provider_id != "font_face" and recommended
+        ]
+
+    def _all_enabled_provider_ids(self) -> list[str]:
+        return [provider_id for provider_id, _, _, enabled in PROVIDERS if enabled and provider_id != "font_face"]
+
+    def _sync_bulk_selection_state(self) -> None:
+        selected = set(self._selected_providers())
+        all_enabled = set(self._all_enabled_provider_ids())
+        recommended = set(self._recommended_provider_ids())
+
+        all_selected = bool(all_enabled) and selected == all_enabled
+        recommended_selected = bool(recommended) and selected == recommended
+
+        self._bulk_sync_in_progress = True
+        self.select_all.setChecked(all_selected)
+        self.select_recommended.setChecked((not all_selected) and recommended_selected)
+        self._bulk_sync_in_progress = False
+
+    def _format_size_gb(self, value: float) -> str:
+        rounded = round(value, 1)
+        if abs(rounded - int(rounded)) < 1e-9:
+            return f"{int(rounded)}GB"
+        return f"{rounded:.1f}GB"
+
+    def _format_time_hours(self, value: float) -> str:
+        total_minutes = max(0, int(round(value * 60)))
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        return f"{hours}.{minutes:02d} Hour"
+
+    def _recalculate_estimate(self) -> None:
+        size_total = 0.0
+        time_total = 0.0
+        for provider_id in self._selected_providers():
+            estimate = PROVIDER_ESTIMATE.get(provider_id, {"size_gb": 0.0, "time_hours": 0.0})
+            size_total += float(estimate.get("size_gb", 0.0))
+            time_total += float(estimate.get("time_hours", 0.0))
+
+        self.estimate_size.setText(f"Size: ~{self._format_size_gb(size_total)}")
+        self.estimate_time.setText(f"Time: ~{self._format_time_hours(time_total)}")
+
     def _validate_output_inputs(self) -> tuple[Path, str] | None:
         downloads_root = self.downloads_root_input.text().strip()
         if not downloads_root:
@@ -519,19 +583,43 @@ class BfdWizardWindow(QMainWindow):
         return root_path, base_folder
 
     def _on_select_all_changed(self, state: int) -> None:
+        if self._bulk_sync_in_progress:
+            return
+
         checked = state == Qt.Checked
+        self._bulk_sync_in_progress = True
+        if checked:
+            self.select_recommended.setChecked(False)
         for provider_id, check in self._provider_checks.items():
             if provider_id == "font_face":
                 continue
             if check.isEnabled():
                 check.setChecked(checked)
+        self._bulk_sync_in_progress = False
+        self._sync_bulk_selection_state()
+        self._recalculate_estimate()
 
     def _on_select_recommended_changed(self, state: int) -> None:
+        if self._bulk_sync_in_progress:
+            return
+
         checked = state == Qt.Checked
+        self._bulk_sync_in_progress = True
+        if checked:
+            self.select_all.setChecked(False)
         for provider_id, _, recommended, enabled in PROVIDERS:
             if not enabled or provider_id == "font_face":
                 continue
             self._provider_checks[provider_id].setChecked(checked and recommended)
+        self._bulk_sync_in_progress = False
+        self._sync_bulk_selection_state()
+        self._recalculate_estimate()
+
+    def _on_provider_selection_changed(self, _state: int) -> None:
+        if self._bulk_sync_in_progress:
+            return
+        self._sync_bulk_selection_state()
+        self._recalculate_estimate()
 
     def _resource_path(self, relative: Path) -> Path:
         if getattr(sys, "frozen", False):
